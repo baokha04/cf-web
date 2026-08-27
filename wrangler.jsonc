@@ -1,0 +1,49 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cf-web",
+  "main": "src/server.ts",
+  "compatibility_date": "2025-01-01",
+  // Required by the agents SDK (it uses node:diagnostics_channel to emit events).
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Tracing. This is the switch that turns on Agents tracing: the SDK's spans
+  // are Workers-native custom spans, and they are a no-op until traces are on.
+  // With this enabled you get, per turn:
+  //   agent_initialization       - Agent constructor setup
+  //   invoke_agent {AgentClass}  - the operation span
+  //   chat {model}               - model call, child of invoke_agent
+  //   execute_tool {tool}        - tool call, child of invoke_agent
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      // Persist to Cloudflare Observability so traces are queryable in the
+      // dashboard. Set to false if you only want them fanned out via
+      // "destinations" to an external OTLP collector.
+      "persist": true,
+      // Sample every trace. Lower this (e.g. 0.1) once traffic grows.
+      "head_sampling_rate": 1,
+      // Add configured OTLP destination names here to also export traces,
+      // e.g. "destinations": ["my-otlp-collector"].
+      "destinations": []
+    }
+  },
+
+  // Structured agent events (RPC, state, schedule, workflow, MCP, ...) are
+  // forwarded automatically to Tail Workers in production. See src/tail.ts.
+  "tail_consumers": [{ "service": "cf-web-tail" }],
+
+  // Workers AI binding used by the agent's inference calls.
+  "ai": { "binding": "AI" },
+
+  "durable_objects": {
+    "bindings": [{ "name": "TracedAgent", "class_name": "TracedAgent" }]
+  },
+
+  // Required: agents need SQLite-backed Durable Objects.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TracedAgent"] }]
+}
