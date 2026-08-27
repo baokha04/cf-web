@@ -2,6 +2,8 @@ import { Agent, callable, routeAgentRequest } from "agents";
 import * as ai from "ai";
 import { wrapAISDK } from "agents/observability/ai";
 import { createWorkersAI } from "workers-ai-provider";
+import { handleSyncRequest } from "./sync/http";
+import { isSyncEnabled, runReconcile, runSync } from "./sync/run";
 
 /**
  * Instrument the AI SDK once, at module scope, and use these wrapped functions
@@ -97,11 +99,59 @@ export class TracedAgent extends Agent<Env, State> {
   }
 }
 
+/**
+ * Must match the second entry of triggers.crons in wrangler.jsonc. The two
+ * schedules share one handler and are told apart by controller.cron.
+ */
+const RECONCILE_CRON = "17 4 * * *";
+
 export default {
   async fetch(request: Request, env: Env) {
+    // Checked BEFORE routeAgentRequest. routeAgentRequest only knows /agents/*
+    // and returns undefined for anything else, so the 404 fallback below is the
+    // real router for new paths -- a route added after it is unreachable.
+    const synced = await handleSyncRequest(request, env);
+    if (synced !== undefined) {
+      return synced;
+    }
+
     return (
       (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
+  },
+
+  /**
+   * Postgres -> D1 replication. Ships disabled: the d1 and hyperdrive ids in
+   * wrangler.jsonc are placeholders until `wrangler d1 create` and
+   * `wrangler hyperdrive create` have run, and an accidental deploy should not
+   * run a broken sync every five minutes.
+   */
+  async scheduled(controller: ScheduledController, env: Env) {
+    if (!isSyncEnabled(env)) {
+      console.log(
+        JSON.stringify({ event: "sync.skipped", reason: "disabled", cron: controller.cron })
+      );
+      return;
+    }
+
+    if (controller.cron === RECONCILE_CRON) {
+      const result = await runReconcile(env);
+      console.log(JSON.stringify({ event: "sync.reconcile.done", cron: controller.cron, ...result }));
+      return;
+    }
+
+    const result = await runSync(env, { trigger: "cron" });
+    console.log(JSON.stringify({ event: "sync.run.done", cron: controller.cron, ...result }));
+
+    // Awaited and rethrown deliberately: a cron that swallows its error is a
+    // cron nobody notices. This marks the invocation failed in observability.
+    const failed = result.tables.filter((table) => table.status === "error");
+    if (failed.length > 0) {
+      throw new Error(
+        `sync failed for ${failed.map((table) => table.tableKey).join(", ")}: ` +
+          failed.map((table) => table.error ?? "unknown").join("; ")
+      );
+    }
   }
 } satisfies ExportedHandler<Env>;

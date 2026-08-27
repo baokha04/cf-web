@@ -7,17 +7,27 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "deploy:tail": "wrangler deploy -c wrangler.tail.jsonc",
-    "typecheck": "tsc --noEmit",
-    "cf-typegen": "wrangler types"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "cf-typegen": "wrangler types",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate:local": "wrangler d1 migrations apply cf-web-replica --local",
+    "db:migrate:remote": "wrangler d1 migrations apply cf-web-replica --remote",
+    "db:list:local": "wrangler d1 migrations list cf-web-replica --local",
+    "db:query:local": "wrangler d1 execute cf-web-replica --local --json --command"
   },
   "dependencies": {
     "agents": "^0.21.0",
     "ai": "^7.0.0",
+    "pg": "^8.23.0",
     "workers-ai-provider": "^4.0.0"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@types/node": "^26.4.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^5.7.0",
+    "vitest": "^4.1.11",
     "wrangler": "^4.0.0"
   }
 }

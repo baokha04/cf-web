@@ -2,6 +2,12 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "cf-web",
   "main": "src/server.ts",
+  // Kept at 2025-01-01 deliberately. nodejs_compat at a date in the
+  // 2024-09-23 .. 2026-08-03 band already selects Node.js compatibility v2,
+  // which is what the `pg` driver needs, and neither D1, Hyperdrive nor cron
+  // triggers are gated on a compatibility date. Bumping it would opt into every
+  // unrelated runtime change between the two dates in a repo whose only
+  // automated gate is tsc. See docs/decisions/0001-postgres-to-d1-one-way-sync.md.
   "compatibility_date": "2025-01-01",
   // Required by the agents SDK (it uses node:diagnostics_channel to emit events).
   "compatibility_flags": ["nodejs_compat"],
@@ -45,5 +51,75 @@
   },
 
   // Required: agents need SQLite-backed Durable Objects.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TracedAgent"] }]
+  //
+  // NOTE: this key is a Durable Object *class* migration. It has nothing to do
+  // with the D1 schema migrations below, which live in "migrations/d1" and are
+  // applied with `wrangler d1 migrations apply`. The directory is named
+  // "migrations/d1" rather than the wrangler default "migrations" precisely so
+  // the two are never confused.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TracedAgent"] }],
+
+  // Read-optimized edge replica fed from Postgres by src/sync/. Postgres stays
+  // the system of record; nothing in the Worker writes to D1 except the sync.
+  //
+  // "database_id" is a placeholder until `wrangler d1 create cf-web-replica` is
+  // run against a real account. Every `--local` command works with the
+  // placeholder, since local D1 is Miniflare-backed and never calls the API.
+  "d1_databases": [
+    {
+      "binding": "REPLICA",
+      "database_name": "cf-web-replica",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations/d1"
+    }
+  ],
+
+  // Postgres source, reached through Hyperdrive so connections are pooled at
+  // the edge instead of dialled per invocation.
+  //
+  // Create the real config with caching OFF:
+  //   wrangler hyperdrive create cf-web-pg \
+  //     --connection-string="postgres://..." --caching-disabled
+  //
+  // Caching defaults to ON (max_age 60s, swr 15s) and is never invalidated by
+  // writes. A replication read is an eligible non-mutating read, so a retried
+  // page inside that window would be served a stale snapshot and the watermark
+  // would advance past rows that were never seen. Local dev cannot reproduce
+  // this: `wrangler dev` connects straight to Postgres with Hyperdrive out of
+  // the path.
+  //
+  // For local dev, export the connection string (the env var wins over
+  // "localConnectionString", and keeps the credential out of git):
+  //   export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_PG="postgres://..."
+  "hyperdrive": [
+    {
+      "binding": "PG",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+
+  // Two schedules, told apart inside scheduled() by controller.cron:
+  //   */5  -> incremental watermark sync
+  //   17 4 -> daily full-key delete reconcile
+  // Cron CPU on the Paid plan is 30s for intervals under an hour (not 15
+  // minutes), so a tick is bounded by SYNC_BUDGET_MS and resumes from its
+  // committed cursor on the next fire.
+  "triggers": {
+    "crons": ["*/5 * * * *", "17 4 * * *"]
+  },
+
+  "vars": {
+    // Ships OFF. The d1/hyperdrive ids above are placeholders, and an
+    // accidental deploy should not run a broken sync every five minutes. Flip
+    // to "true" once `d1 create` and `hyperdrive create` have run.
+    // Note commenting out "crons" would NOT disable the trigger - only an empty
+    // array or a runtime guard like this one does.
+    "SYNC_ENABLED": "false",
+    // Wall-clock budget for one run. Well inside the 30s cron CPU ceiling.
+    "SYNC_BUDGET_MS": "20000",
+    // D1 allows 1000 queries per Worker invocation on the Paid plan. 800 leaves
+    // headroom for _sync_state reads and the status endpoint. The Free plan
+    // allows 50, which this design does not fit.
+    "SYNC_MAX_D1_STATEMENTS": "800"
+  }
 }
