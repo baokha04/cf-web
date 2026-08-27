@@ -91,3 +91,26 @@ error messages are never recorded regardless of these flags.
 
 `head_sampling_rate` is `1` (every trace). Lower it as traffic grows. To export to an
 external OTLP collector, add its configured name to `observability.traces.destinations`.
+
+## Cloudflare skills
+
+This repo vendors the [`cloudflare/skills`](https://github.com/cloudflare/skills) plugin into
+`.claude/skills/` (13 skills) and `.claude/commands/` (2 slash commands), pinned to commit
+`f96bff7`.
+
+They are checked in rather than installed via `/plugin` because `/plugin` is unavailable in
+Claude Code web/remote sessions, and vendoring means they survive container restarts and
+work for anyone who clones the repo. Skills load at session start, so a new session picks
+them up automatically.
+
+Most relevant here: `agents-sdk`, `workers-best-practices`, `durable-objects`, `wrangler`,
+and `cloudflare` (which carries `references/observability/` and `references/tail-workers/`).
+
+To update: re-clone upstream and copy `skills/` and `commands/` over `.claude/`.
+
+### MCP servers
+
+`.mcp.json` ships with the plugin and points at five remote Cloudflare MCP servers
+(`api`, `docs`, `bindings`, `builds`, `observability` on `*.mcp.cloudflare.com`). Sessions
+opening this repo will be prompted to connect to them. Delete the file if you don't want
+that — the skills work without it.
