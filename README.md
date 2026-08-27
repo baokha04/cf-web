@@ -108,6 +108,18 @@ curl -X POST -H "authorization: Bearer dev-token" -H 'content-type: application/
   -d '{"table":"demo_items","truncate":true}' localhost:8787/__sync/reset
 ```
 
+Two things that will waste your time otherwise:
+
+- `wrangler` resolves `.dev.vars` relative to the **config file's** directory, not
+the working directory. Running against a config outside the repo leaves
+`SYNC_TRIGGER_TOKEN` unset, and every `/__sync/*` request answers 403 — which looks
+exactly like a broken guard.
+- Replicated timestamps are stored at **six** fractional digits, matching Postgres's
+microsecond precision. Do not re-normalise them through a JS `Date` (three digits):
+a truncated cursor sorts earlier than the row it came from, and the sync then
+replays the same page until its budget runs out. See load-bearing property 4 in the
+decision record.
+
 `preflight=1` checks the source against the spec's preconditions: a NOT NULL key and cursor
 column, an index covering `(cursorColumn, primaryKey)`, and a `BEFORE UPDATE` trigger. That
 trigger is mandatory — a write path that forgets to move the cursor column makes the row
@@ -118,7 +130,7 @@ together. Use soft deletes, or opt a table into the nightly `reconcileDeletes` k
 
 Design rationale, limits and known gaps:
 [`docs/decisions/0001-postgres-to-d1-one-way-sync.md`](docs/decisions/0001-postgres-to-d1-one-way-sync.md)
-and [`docs/plans/active/postgres-d1-sync.md`](docs/plans/active/postgres-d1-sync.md).
+and [`docs/plans/completed/postgres-d1-sync.md`](docs/plans/active/postgres-d1-sync.md).
 
 ## Checks
 

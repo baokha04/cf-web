@@ -55,16 +55,50 @@ describe("encodeValue", () => {
 
   it("normalises every timestamp shape to ISO-8601 UTC", () => {
     expect(encodeValue(new Date("2026-08-27T10:00:00Z"), "timestamp")).toBe(
-      "2026-08-27T10:00:00.000Z"
+      "2026-08-27T10:00:00.000000Z"
     );
     // A `timestamp without time zone` arrives as raw text with no offset. It is
     // read as UTC, never as the runtime's local time.
-    expect(encodeValue("2026-08-27 10:00:00", "timestamp")).toBe("2026-08-27T10:00:00.000Z");
+    expect(encodeValue("2026-08-27 10:00:00", "timestamp")).toBe("2026-08-27T10:00:00.000000Z");
     // Postgres renders a one-part offset; Date needs the two-part form.
-    expect(encodeValue("2026-08-27 10:00:00+07", "timestamp")).toBe("2026-08-27T03:00:00.000Z");
-    expect(encodeValue("2026-08-27", "timestamp")).toBe("2026-08-27T00:00:00.000Z");
+    expect(encodeValue("2026-08-27 10:00:00+07", "timestamp")).toBe("2026-08-27T03:00:00.000000Z");
+    expect(encodeValue("2026-08-27", "timestamp")).toBe("2026-08-27T00:00:00.000000Z");
     expect(() => encodeValue("not a date", "timestamp")).toThrow(/cannot parse/);
     expect(() => encodeValue(new Date(Number.NaN), "timestamp")).toThrow(/Invalid Date/);
+  });
+
+  /**
+   * Regression. Truncating a Postgres microsecond timestamp to milliseconds
+   * makes the stored cursor strictly LESS than the row it came from, so
+   * `(cursorColumn, primaryKey) > (cursor)` still matches rows that were
+   * already synced. Observed end to end: a 1000-row table replayed the same
+   * 500-row page 17 times and exhausted the statement budget without the
+   * watermark ever advancing.
+   */
+  it("preserves microseconds, so a cursor is never less than its own row", () => {
+    expect(encodeValue("2026-08-27 09:17:45.746275+00", "timestamp")).toBe(
+      "2026-08-27T09:17:45.746275Z"
+    );
+    // Precision survives the offset conversion too.
+    expect(encodeValue("2026-08-27 16:17:45.746275+07", "timestamp")).toBe(
+      "2026-08-27T09:17:45.746275Z"
+    );
+    // Short fractions pad rather than shift: .746 is 746000us, not 746us.
+    expect(encodeValue("2026-08-27 09:17:45.746+00", "timestamp")).toBe(
+      "2026-08-27T09:17:45.746000Z"
+    );
+    // What the truncating version produced, kept here so the regression is
+    // legible: a Date-normalised cursor lands 275us BEFORE the row it came
+    // from, so that row matches its own cursor again on the next page.
+    expect(new Date("2026-08-27T09:17:45.746275Z").toISOString()).toBe(
+      "2026-08-27T09:17:45.746Z"
+    );
+
+    // Six fixed digits keep lexicographic order aligned with temporal order,
+    // which is what lets D1 hold the cursor as TEXT and still compare it.
+    const earlier = encodeValue("2026-08-27 09:17:45.746274+00", "timestamp") as string;
+    const later = encodeValue("2026-08-27 09:17:45.746275+00", "timestamp") as string;
+    expect(later > earlier).toBe(true);
   });
 
   it("serialises json and passes through text that is already JSON", () => {

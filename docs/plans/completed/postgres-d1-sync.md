@@ -4,7 +4,7 @@ Date: 2026-08-27
 
 ## Status
 
-Active
+Completed
 
 ## Outcome
 
@@ -163,8 +163,8 @@ an incremental tick.
 - [x] `vitest` suite and `vitest.config.ts`.
 - [x] `npm run cf-typegen`, `npm run typecheck`, `npm test`, local D1 migrations.
 - [x] Decision record.
-- [ ] End-to-end proof against a live Postgres.
-- [ ] Move to `docs/plans/completed/`.
+- [x] End-to-end proof against a live Postgres.
+- [x] Move to `docs/plans/completed/`.
 
 ## Decisions
 
@@ -219,28 +219,65 @@ an incremental tick.
 - Repository-required checks: `npm run cf-typegen` then `npm run typecheck`, which
   now covers the test project as well as `src/`. Both clean.
 
-**Not proven, and not to be implied by a green typecheck:**
+**End-to-end proof, PostgreSQL 16.13, 2026-08-27.** Local Postgres seeded with
+1000 rows, `wrangler dev` on a config derived from `wrangler.jsonc` with `ai`
+and `tail_consumers` stripped, Hyperdrive pointed at the local database via
+`CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_PG`.
 
-1. That `pg` reaches Postgres through Hyperdrive's wire proxy in the deployed
-   runtime. Local dev connects directly, so Hyperdrive is never in the path.
-   This is the largest locally-unverifiable risk in the design.
-2. That the row-value seek executes and uses the composite index on a real
-   Postgres.
-3. The tie-break assertion itself: bulk-update more rows than `pageSize` so they
-   share one `updated_at`, sync, and assert no row is lost. This is the most
-   important single piece of evidence for the design and it is deferred.
-4. The `set_updated_at` trigger and `preflight()` against a real schema.
-5. That cron fires on schedule and that `--caching-disabled` takes effect.
+| Check | Result |
+| --- | --- |
+| Agent routes and 404 fallback | Unchanged; `/__sync/*` is matched ahead of `routeAgentRequest` without shadowing it |
+| Auth guard | 403 with no token and with a wrong token; 200 with the right one |
+| `preflight` against the real schema | `ok: true` -- found the composite index and the `BEFORE UPDATE` trigger |
+| Initial backfill | 1000 rows in 2 pages, `status: ok` |
+| Parity | 1000/1000 rows, high-water mark identical to the microsecond |
+| Idempotency | Re-run with no source change: 0 rows, 0 pages |
+| Safety lag | An update inside the 5s window is correctly withheld, then picked up after it |
+| Single-row incremental | Exactly 1 row |
+| **Boundary timestamp (tie-break)** | 600 rows sharing one `updated_at`, spanning the 500-row page boundary: all 600 replicated, `sum(qty)` identical on both sides |
+| Soft delete | Tombstone mirrored into the replica |
+| Hard delete | Invisible to the watermark, as documented -- replica still held the row |
+| Reconcile | 999 keys scanned, the 1 orphan deleted, parity restored |
+| Cron `*/5` and `17 4` | Dispatch correctly on `controller.cron`; structured logs correlate by `runId` |
+| Kill switch | `SYNC_ENABLED="false"` emits `sync.skipped` and replicates nothing |
 
-The minimum sequence to close that gap once a Postgres is available: apply
-`sql/postgres/0001_demo_items.sql`, seed 1000 rows, `POST /__sync/run`, compare
-`count(*)` and `max(updated_at)` on both sides, change one row and assert
-`rowsUpserted === 1`, re-run and assert `0`, bulk-update 600 rows for the
-tie-break, soft delete, hard delete (D1 correctly still holds the row), then
-reconcile and watch it disappear.
+**The run found one real bug, and it was the kind only this proof could find.**
+The first backfill reported 8500 rows upserted from a 1000-row source across 17
+identical pages, exhausting the statement budget without the watermark moving.
+Cause: `pg` parses `timestamptz` (OID 1184) into a JS `Date`, which carries
+milliseconds, so Postgres's microseconds were gone before `encodeValue` saw the
+value; `.746Z` stored as a cursor is strictly earlier than the row's actual
+`.746275`, so every already-synced row matched the cursor again. Verified
+directly against the source: the truncated cursor still matched all 1000 rows
+where the exact one matched 500. Fixed by pinning OID 1184 to raw wire text
+alongside 1082 and 1114, and normalising timestamps to six fractional digits.
+Regression test in `test/sync/apply.test.ts`; recorded as load-bearing property
+4 in the decision record.
+
+The unit suite did not catch this: it asserted the *shape* of the SQL, not the
+round-trip fidelity of the value the cursor carries.
+
+**Still not proven.** `pg` reaching Postgres through Hyperdrive's wire proxy in
+the deployed runtime. `wrangler dev` connects directly, so Hyperdrive is never
+in the path locally, and no local run can exercise it. Related and equally
+unexercised: that `--caching-disabled` takes effect on the real config, and that
+cron fires on Cloudflare's schedule rather than through
+`/cdn-cgi/handler/scheduled`.
+
+**Operational note worth keeping.** `wrangler` resolves `.dev.vars` relative to
+the *config file's* directory, not the working directory. Running against a
+config outside the repo means `SYNC_TRIGGER_TOKEN` is not loaded and every
+`/__sync/*` request returns 403 -- which looks exactly like a broken guard.
 
 ## Result
 
-Pending. Complete once the end-to-end sequence above passes against a live
-Postgres. Until then this plan stays `Active` and does not move to
-`docs/plans/completed/`.
+Complete. The pipeline replicates correctly against a real PostgreSQL 16,
+including the boundary-timestamp case the design exists to handle. One
+cursor-precision bug was found and fixed under proof rather than in production,
+where it would have presented as a sync that burns its whole budget every tick
+and never advances.
+
+Limitation carried forward, not resolved: the Hyperdrive wire path is
+unexercised, because local development bypasses it entirely. The first deploy
+should watch `lagSeconds` and row-count parity before the replica is trusted for
+reads.

@@ -56,23 +56,47 @@ function guardSize(value: string | ArrayBuffer, kind: "TEXT" | "BLOB"): void {
   }
 }
 
-/** Postgres renders timestamps several ways; D1 stores one. */
+/**
+ * Postgres renders timestamps several ways; D1 stores one, at SIX fractional
+ * digits.
+ *
+ * The precision is not cosmetic. Postgres timestamps carry microseconds and a
+ * JS Date carries only milliseconds, so normalising through Date.toISOString()
+ * truncates. A truncated cursor is strictly LESS than the row it came from,
+ * which makes `(cursorColumn, primaryKey) > (cursor)` match rows that were
+ * already synced -- the run then re-reads the same page until its budget runs
+ * out and the watermark never advances. Regression test in
+ * test/sync/apply.test.ts; see also the 1184 type parser in ./pull.ts.
+ */
+const TIMESTAMP =
+  /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.(\d+))?)?(Z|[+-]\d{2}(?::?\d{2})?)?$/;
+
 function toIsoUtc(value: string): string {
-  // "2026-08-27 10:00:00+00" -> "2026-08-27T10:00:00+00:00", and a value with
-  // no zone at all is read as UTC rather than as the runtime's local time.
-  // A bare date has no time part at all; without this it would become
-  // "2026-08-27Z", which Date rejects.
-  let text = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value;
-  text = text.includes("T") ? text : text.replace(" ", "T");
-  text = text.replace(/([+-]\d{2})$/, "$1:00");
-  if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(text)) {
-    text = `${text}Z`;
+  const match = TIMESTAMP.exec(value.trim());
+  if (match === null) {
+    throw new Error(`cannot parse "${value}" as a timestamp`);
   }
-  const parsed = new Date(text);
+
+  const [, date, time = "00:00:00", fraction = "", rawZone] = match;
+  const clock = time!.length === 5 ? `${time}:00` : time!;
+
+  // Postgres renders a one- or two-part offset ("+07", "+0700"); Date needs the
+  // colonned form. No offset at all is read as UTC, never as local time.
+  let zone = rawZone ?? "Z";
+  if (zone.length === 3) {
+    zone = `${zone}:00`;
+  } else if (zone.length === 5) {
+    zone = `${zone.slice(0, 3)}:${zone.slice(3)}`;
+  }
+
+  // Date does the offset arithmetic, but only down to the second: the fraction
+  // is carried across verbatim so nothing is lost on the way through.
+  const parsed = new Date(`${date}T${clock}${zone}`);
   if (Number.isNaN(parsed.getTime())) {
     throw new Error(`cannot parse "${value}" as a timestamp`);
   }
-  return parsed.toISOString();
+
+  return `${parsed.toISOString().slice(0, 19)}.${`${fraction}000000`.slice(0, 6)}Z`;
 }
 
 /**
@@ -153,7 +177,9 @@ export function encodeValue(value: unknown, type: SyncColumnType): D1Value {
         if (Number.isNaN(value.getTime())) {
           throw new Error("timestamp value is an Invalid Date");
         }
-        return value.toISOString();
+        // A Date only carries milliseconds. Pad to the same six digits so a
+        // mapRow-produced Date and a raw Postgres string are comparable.
+        return `${value.toISOString().slice(0, 23)}000Z`;
       }
       return toIsoUtc(String(value));
     }

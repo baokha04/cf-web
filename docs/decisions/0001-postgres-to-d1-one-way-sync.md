@@ -42,6 +42,18 @@ Three properties are load-bearing and must survive any refactor:
    (`WHERE excluded.updated_at >= target.updated_at` on `DO UPDATE`). This makes
    at-least-once delivery safe: replaying an older page is a no-op.
 
+4. **The cursor must round-trip at Postgres's own precision.** Postgres
+   timestamps carry microseconds; a JS `Date` carries milliseconds. Normalising
+   the cursor through `Date.toISOString()` truncates it, and a truncated cursor
+   is strictly *earlier* than the row it came from, so
+   `(cursorColumn, primaryKey) > (cursor)` matches rows that were already
+   synced. The run then replays the same page until its budget runs out and the
+   watermark never advances. This was observed end to end -- a 1000-row table
+   reported 8500 rows upserted across 17 identical pages -- and is why
+   `pg`'s type parser is pinned to raw wire text for OIDs 1082, 1114 **and
+   1184**, and why `encodeValue` normalises timestamps to six fractional
+   digits rather than to `Date`'s three.
+
 Deletes: soft deletes (`deleted_at`) are the convention. A watermark cannot
 observe a hard delete, because the row and its timestamp disappear together, so
 an opt-in nightly full-key reconcile is the fallback for tables that hard-delete
@@ -91,6 +103,9 @@ Tradeoffs:
   past rows that were never read. Local development cannot reproduce this,
   because `wrangler dev` connects straight to Postgres with Hyperdrive out of
   the path.
+- Replicated timestamps are stored at six fractional digits, so the replica's
+  text form differs from a `Date`-derived one. Any code that reads the replica
+  and re-normalises through `Date` will drop precision again.
 - D1's 100-bound-parameter limit means a wide table packs few rows per
   statement, so statement counts -- and the 1000-per-invocation ceiling -- scale
   with column count. The replicated column list is a projection; keep it narrow.
@@ -99,9 +114,12 @@ Tradeoffs:
 
 ## Follow-Up
 
-- Prove the pipeline end to end against a live Postgres. Until then
-  `docs/plans/active/postgres-d1-sync.md` stays open and lists exactly what is
-  unproven.
-- Create the real D1 database and Hyperdrive config, then flip `SYNC_ENABLED`
-  to `"true"`.
+- Proven end to end against PostgreSQL 16 on 2026-08-27, including the
+  boundary-timestamp case that motivates property 1 and the truncation bug
+  described in property 4. Evidence in
+  `docs/plans/completed/postgres-d1-sync.md`.
+- Create the real D1 database and Hyperdrive config (with
+  `--caching-disabled`), then flip `SYNC_ENABLED` to `"true"`. Still
+  outstanding: the Hyperdrive wire path is the one thing local development
+  cannot exercise, because `wrangler dev` connects to Postgres directly.
 - Revisit `head_sampling_rate` and the cron interval once real volume exists.

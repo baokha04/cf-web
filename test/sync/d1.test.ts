@@ -81,7 +81,7 @@ describe("upsert", () => {
       metadata: '{"n":1}',
       is_active: 1,
       deleted_at: null,
-      updated_at: "2026-08-27T10:00:00.000Z"
+      updated_at: "2026-08-27T10:00:00.000000Z"
     });
   });
 

@@ -8,17 +8,23 @@ import type { SyncCursor, TableSpec } from "./types";
  * The Postgres side: connection, type parsing, and executing the queries that
  * ./sql.ts builds.
  *
- * node-postgres parses `date` (OID 1082) and `timestamp` (1114) into JS Date
+ * node-postgres parses `date` (1082) and `timestamp` (1114) into JS Date
  * objects interpreted in the HOST timezone, which silently shifts the value by
- * the runtime's offset. Keeping them as raw wire text and normalising in
- * encodeValue is the only way to get a stable instant into D1. `timestamptz`
- * (1184) is unambiguous and is left as a Date.
+ * the runtime's offset.
+ *
+ * `timestamptz` (1184) is unambiguous about its instant but is parsed into a
+ * Date too -- and a Date carries only milliseconds, so Postgres's microseconds
+ * are gone before encodeValue ever sees the value. That truncation is what
+ * makes a cursor compare LESS than the row it came from, so the sync re-reads
+ * the same page forever. All three are pinned to raw wire text and normalised
+ * in encodeValue instead.
  *
  * int8 (20) already comes back as a string; pinned here so a future pg release
  * cannot start rounding it under us.
  */
 types.setTypeParser(1082, (value: string) => value);
 types.setTypeParser(1114, (value: string) => value);
+types.setTypeParser(1184, (value: string) => value);
 types.setTypeParser(20, (value: string) => value);
 
 /**
