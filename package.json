@@ -1,0 +1,23 @@
+{
+  "name": "cf-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:tail": "wrangler deploy -c wrangler.tail.jsonc",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types"
+  },
+  "dependencies": {
+    "agents": "^0.21.0",
+    "ai": "^7.0.0",
+    "workers-ai-provider": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.0.0"
+  }
+}
